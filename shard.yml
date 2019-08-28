@@ -1,0 +1,13 @@
+name: tunnel
+version: 0.1.0
+
+authors:
+  - Kevin <root@unixs.org>
+
+targets:
+  tunnel:
+    main: src/tunnel.cr
+
+crystal: 0.30.0
+
+license: MIT
