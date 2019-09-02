@@ -13,6 +13,7 @@ p plaintext
 p plaintext.size
 
 cipher.reset
+cipher.init
 
 text2 = "1234567890!@$%^&*()[]{}-="
 ciphertext = cipher.encrypt text2.to_slice

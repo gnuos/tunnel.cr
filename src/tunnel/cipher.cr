@@ -1,9 +1,18 @@
 module Tunnel
-  class Cipher
-    @key : Slice(UInt8)
-    @iv : Slice(UInt8)
+  struct Cipher
+    property encryptor : OpenSSL::Cipher
+    property decryptor : OpenSSL::Cipher
+
+    @key : Bytes
+    @iv : Bytes
 
     def initialize(secret : String)
+      raise "secret must be provided" if secret.nil?
+      raise "secret size must be greater than 6" if secret.size < 6
+
+      @encryptor = OpenSSL::Cipher.new("AES-256-GCM")
+      @decryptor = OpenSSL::Cipher.new("AES-256-GCM")
+
       h = OpenSSL::Digest.new("SHA256")
       @key = h.update(secret.to_slice).digest
       h.reset
@@ -12,10 +21,7 @@ module Tunnel
       @iv = h.update(secret.to_slice.clone.reverse!).digest
       h.reset
 
-      @encryptor = OpenSSL::Cipher.new("AES-256-GCM")
-      @decryptor = OpenSSL::Cipher.new("AES-256-GCM")
-
-      cipherinit
+      init
     end
 
     def encrypt(data : Bytes) : Bytes
@@ -37,11 +43,9 @@ module Tunnel
     def reset
       @encryptor.reset
       @decryptor.reset
-
-      cipherinit
     end
 
-    private def cipherinit
+    def init
       @encryptor.encrypt
       @decryptor.encrypt
 
