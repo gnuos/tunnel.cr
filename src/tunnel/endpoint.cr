@@ -1,50 +1,41 @@
 module Tunnel
   abstract class EndPoint
-    property secret : String
-    property bind_addr : Socket::IPAddress
-    property toward_addr : Socket::IPAddress
+    property options : Options
 
-    def initialize(from : String, to : String, @secret : String)
-      raise "please give your secret to secure the tunnel" if secret.empty?
-
-      @bind_addr = Socket::IPAddress.parse("tcp://#{from}")
-      @toward_addr = Socket::IPAddress.parse("tcp://#{to}")
+    def initialize(@options : Options)
+      raise "please give your secret to secure the tunnel" if !options.is_transparent? && options.secret.empty?
 
       @sessions_count = 0_i32
     end
 
     def listen(host : String, port : Int32, reuse_port : Bool = false)
-      begin
-        server = TCPServer.new(host, port, reuse_port: reuse_port)
-
-        loop do
-          if conn = server.accept?
-            spawn transport(conn)
-          end
+      server = TCPServer.new(host, port, reuse_port: reuse_port)
+      loop do
+        conn = server.accept?
+        if conn
+          spawn transport(conn)
         end
-      rescue e
-        handle_exception(e)
       end
     end
 
     def start
-      listen @bind_addr.address, @bind_addr.port
+      listen options.listen.address, options.listen.port
     end
 
-    private abstract def prepare_recv(cipher : Cipher, buf : Bytes) : Bytes
-    private abstract def prepare_send(cipher : Cipher, buf : Bytes) : Bytes
+    private abstract def prepare_recv(buf : Bytes) : Bytes
+    private abstract def prepare_send(buf : Bytes) : Bytes
 
     private def transport(client : TCPSocket)
       upstream = uninitialized TCPSocket
 
       begin
         start_time = Time.now
-        upstream = TCPSocket.new(@toward_addr.address, @toward_addr.port)
+        upstream = TCPSocket.new(options.forward.address, options.forward.port)
         connect_time = (Time.now - start_time).total_nanoseconds
 
         read_bytes = 0_u64
         write_bytes = 0_u64
-        start_time = Time.now
+        start_time = Time.now # 在连接成功后开始计算传输时间
         client_terminated = Channel(Bool).new
         upstream_terminated = Channel(Bool).new
 
@@ -53,7 +44,7 @@ module Tunnel
         source_addr = client.remote_address
         target_addr = upstream.remote_address
 
-        puts sprintf("[#{Time.now.to_unix_f}]\t-- :  [tcp] %s - %s", source_addr, target_addr)
+        puts sprintf("[#{Time.now.to_unix_f}]\t-- :  [tcp] %s -- %s", source_addr, target_addr)
 
         spawn do
           buffer = uninitialized UInt8[4096]
@@ -63,21 +54,22 @@ module Tunnel
               len = client.read(buffer.to_slice).to_i32
               unless len > 0
                 if len == 0
-                  puts "[#{Time.now.to_unix_f}]\t-- :  [tcp] #{source_addr} disconnected."
-                end
+                  puts "[#{Time.now.to_unix_f}]\t-- :  [tcp] #{source_addr} disconnected." if options.debug_log?
 
-                upstream.close_write
-                upstream.close_read unless upstream.peek.empty?
+                  upstream.close_write
+                  upstream.close_read
+                elsif Errno.value != Errno::EAGAIN && Errno.value != Errno::EWOULDBLOCK
+                  client.close_read unless client.peek.empty?
+                end
                 break
               end
 
-              puts sprintf("[#{Time.now.to_unix_f}]\t-- :    [tcp] %s -> %s ... #{len} bytes\t##{@sessions_count}", source_addr, target_addr)
-              cipher = Cipher.new @secret
-              data = prepare_send(cipher, buffer.to_slice[0, len])
-              cipher.reset
-
+              data = buffer.to_slice[0, len]
+              data = prepare_recv(data) unless options.is_transparent?
               upstream.write(data)
               write_bytes += len
+
+              puts sprintf("[#{Time.now.to_unix_f}]\t-- :    [tcp] %s --> %s ... #{len} bytes\t##{@sessions_count}", source_addr, target_addr) if options.debug_log?
             rescue Errno
               break if Errno.value == Errno::ENOTCONN
             rescue ex
@@ -98,24 +90,25 @@ module Tunnel
               unless len > 0
                 if len == 0
                   puts "[#{Time.now.to_unix_f}]\t-- :  [tcp] #{target_addr} disconnected."
-                end
 
-                client.close_write
-                client.close_read unless client.peek.empty?
+                  client.close_write
+                  client.close_read
+                elsif Errno.value != Errno::EAGAIN && Errno.value != Errno::EWOULDBLOCK
+                  upstream.close_read if upstream.peek.empty?
+                end
                 break
               end
 
-              puts sprintf("[#{Time.now.to_unix_f}]\t-- :    [tcp] %s <- %s ... #{len} bytes\t##{@sessions_count}", source_addr, target_addr)
-              cipher = Cipher.new @secret
-              data = prepare_recv(cipher, buffer.to_slice[0, len])
-              cipher.reset
-
+              data = buffer.to_slice[0, len]
+              data = prepare_recv(data) unless options.is_transparent?
               client.write(data)
               read_bytes += len
+
+              puts sprintf("[#{Time.now.to_unix_f}]\t-- :    [tcp] %s <-- %s ... #{len} bytes\t##{@sessions_count}", source_addr, target_addr) if options.debug_log?
             rescue Errno
               break if Errno.value == Errno::ENOTCONN
             rescue ex
-              handle_exception(ex)
+              # handle_exception(ex)
               break
             end
           end
@@ -127,12 +120,12 @@ module Tunnel
         if client_terminated.receive && upstream_terminated.receive
           transfer_time = (Time.now - start_time).total_nanoseconds
 
-          puts sprintf("[#{Time.now.to_unix_f}]\t-- :  [tcp] %s <> %s ... #{transfer_time}ns\t##{@sessions_count}", source_addr, target_addr)
-          puts sprintf("[#{client.inspect}]\t-- :  read:%d(bytes) write:%d(bytes) c_time:%.1fns t_time:%.1fns session:#%d\n",
-            read_bytes, write_bytes, connect_time, transfer_time, @sessions_count)
+          puts sprintf("[#{Time.now.to_unix_f}]\t-- :  [tcp] %s <-> %s ... #{transfer_time}ns\t##{@sessions_count}", source_addr, target_addr) if options.debug_log?
+          puts sprintf("[Tun--#{source_addr}]\t-- :  read:%d(bytes) write:%d(bytes) c_time:%.1fns t_time:%.1fns session:#%d\n",
+            read_bytes, write_bytes, connect_time, transfer_time, @sessions_count) if options.debug_log?
         end
       rescue e
-        handle_exception(e)
+        # handle_exception(e)
         return
       ensure
         upstream.close unless upstream.closed?
